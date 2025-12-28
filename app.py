@@ -862,7 +862,7 @@ with right:
                                 st.error(err)
                             else:
                                 st.rerun()
-                                elif off["phase"] == "reveal":
+                elif off["phase"] == "reveal":
                     # Everyone sees the offer + the picked result for 5 seconds
                     st.warning("🎭 Reveal phase (5 seconds)… everyone can see what happened.")
                     st.write("")

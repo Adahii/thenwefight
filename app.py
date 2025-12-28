@@ -4,6 +4,7 @@ import string
 import time
 import requests
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 import streamlit as st
 
 # ----------------------------
@@ -297,6 +298,18 @@ def gen_room_code():
         exists = q("SELECT 1 FROM rooms WHERE room_code=?", (code,), one=True)
         if not exists:
             return code
+            
+AUTO_REFRESH_MS = 1200  # 0.8–2s is a good range
+
+def enable_autorefresh():
+    """
+    Causes each player's browser session to re-run the script periodically,
+    so everyone sees DB changes without clicking anything.
+    """
+    if st.session_state.get("room_code") and st.session_state.get("player_id"):
+        # room-specific key prevents collisions if you join different rooms
+        st_autorefresh(interval=AUTO_REFRESH_MS, key=f"tick_{st.session_state.room_code}")
+
 
 def add_feed(room_code: str, msg: str):
     q("INSERT INTO feed(room_code, at, message) VALUES(?,?,?)", (room_code, now_iso(), msg))

@@ -146,25 +146,26 @@ def list_players(room_code: str) -> List[Dict[str, Any]]:
     return res.data or []
 
 
-def create_room(host_name: str, host_icon: str) -> Dict[str, Any]:
-    room_code = gen_room_code()
-    host_id = None
+def create_room(host_name: str, host_icon: str):
+    room_code = generate_room_code()  # however you do this (e.g., 5 letters)
 
-    # create placeholder room first (need host id)
-    tmp_host = sb().table("players").insert({
+    # 1) Create the room FIRST
+    sb().table("rooms").insert({
+        "room_code": room_code,
+        "status": "lobby",
+        "current_turn": 0
+    }).execute()
+
+    # 2) Then create the host player referencing that room_code
+    host_res = sb().table("players").insert({
         "room_code": room_code,
         "name": host_name,
         "icon": host_icon,
         "is_host": True,
         "is_ready": True
     }).execute()
-    host_id = tmp_host.data[0]["player_id"]
 
-    sb().table("rooms").insert({
-        "room_code": room_code,
-        "host_player_id": host_id,
-        "phase": "lobby",
-    }).execute()
+    host_id = host_res.data[0]["player_id"]
 
     return {"room_code": room_code, "player_id": host_id}
 

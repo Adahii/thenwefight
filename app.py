@@ -3,6 +3,7 @@ import random
 import string
 import requests
 from datetime import datetime, timedelta
+
 from streamlit_autorefresh import st_autorefresh
 import streamlit as st
 
@@ -18,7 +19,6 @@ st.set_page_config(
 
 CUSTOM_CSS = """
 <style>
-/* Modern dark look */
 :root {
   --bg: #0b1020;
   --card: rgba(255,255,255,0.06);
@@ -46,13 +46,6 @@ h1, h2, h3, h4 { letter-spacing: -0.02em; }
   border: 1px solid var(--border);
   border-radius: 18px;
   padding: 16px 16px;
-}
-
-.block-card2 {
-  background: var(--card2);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 14px 14px;
 }
 
 .badge {
@@ -96,86 +89,37 @@ hr { border-color: rgba(255,255,255,0.10) !important; }
   margin-bottom: 8px;
 }
 
-/* ----------------------------
-   Reveal animations
-   ---------------------------- */
-.reveal-stage {
-  width: 100%;
-  display: flex;
-  justify-content: center;
-  margin-top: 6px;
-}
-
-.reveal-card {
-  width: min(560px, 100%);
-  background: rgba(255,255,255,0.05);
+.hint-card {
+  border-radius: 14px;
   border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 20px;
-  padding: 16px 16px 18px 16px;
-}
-
-.reveal-title {
-  font-weight: 900;
-  font-size: 18px;
-  margin-bottom: 10px;
-  letter-spacing: -0.02em;
-}
-
-.reveal-sub {
-  color: rgba(255,255,255,0.70);
-  font-size: 13px;
-  margin-bottom: 14px;
-}
-
-/* container for images */
-.reveal-box {
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  max-height: 420px;
-  border-radius: 18px;
-  border: 1px solid rgba(255,255,255,0.14);
   background: rgba(255,255,255,0.03);
-  overflow: hidden;
-  position: relative;
+  padding: 16px;
+  min-height: 160px;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  align-items:center;
+  text-align:center;
 }
 
-/* image styling */
-.reveal-img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  padding: 18px;
-  transform: translateZ(0);
+.hint-title {
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  font-size: 18px;
+  margin-bottom: 8px;
 }
 
-/* LIE: crossfade + slight pop to real at ~60% into the animation */
-@keyframes hideShown {
-  0%   { opacity: 1; transform: scale(1); }
-  55%  { opacity: 1; transform: scale(1.02); }
-  70%  { opacity: 0; transform: scale(0.98); }
-  100% { opacity: 0; transform: scale(0.98); }
+.hint-value {
+  font-weight: 800;
+  font-size: 28px;
+  color: rgba(255,255,255,0.92);
 }
-@keyframes showReal {
-  0%   { opacity: 0; transform: scale(0.98); }
-  60%  { opacity: 0; transform: scale(0.98); }
-  75%  { opacity: 1; transform: scale(1.03); }
-  100% { opacity: 1; transform: scale(1.00); }
-}
-.reveal-lie-shown { animation: hideShown 2.8s ease-in-out forwards; }
-.reveal-lie-real  { animation: showReal  2.8s ease-in-out forwards; }
 
-/* TRUTH: flash green border twice */
-@keyframes truthFlash {
-  0%   { box-shadow: 0 0 0 rgba(46,204,113,0.0), inset 0 0 0 rgba(46,204,113,0.0); }
-  15%  { box-shadow: 0 0 0 6px rgba(46,204,113,0.35), inset 0 0 0 2px rgba(46,204,113,0.25); }
-  30%  { box-shadow: 0 0 0 rgba(46,204,113,0.0), inset 0 0 0 rgba(46,204,113,0.0); }
-  45%  { box-shadow: 0 0 0 6px rgba(46,204,113,0.35), inset 0 0 0 2px rgba(46,204,113,0.25); }
-  60%  { box-shadow: 0 0 0 rgba(46,204,113,0.0), inset 0 0 0 rgba(46,204,113,0.0); }
-  100% { box-shadow: 0 0 0 rgba(46,204,113,0.0), inset 0 0 0 rgba(46,204,113,0.0); }
+.hint-sub {
+  margin-top: 10px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
 }
-.reveal-truth-box { animation: truthFlash 1.6s ease-in-out forwards; }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -185,7 +129,19 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # ----------------------------
 ICONS = ["🎩", "🔥", "🧠", "🎮", "⚔️", "🛡️", "🌙", "⚡", "❄️", "🍀", "👑", "🦄"]
 POKEAPI_BASE = "https://pokeapi.co/api/v2"
+
 GOAL_PER_PLAYER = 6
+
+MODE_DISGUISE = "Disguise Draft"
+MODE_TYPE = "Mystery: Typing"
+MODE_HEIGHT = "Mystery: Height"
+MODE_WEIGHT = "Mystery: Weight"
+MODE_COLOR = "Mystery: Color"
+
+ALL_MODES = [MODE_DISGUISE, MODE_TYPE, MODE_HEIGHT, MODE_WEIGHT, MODE_COLOR]
+
+AUTO_REFRESH_MS = 1200
+
 
 # ----------------------------
 # DB helpers
@@ -196,6 +152,7 @@ def db():
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def q(sql, params=(), one=False):
     cur = db().cursor()
     cur.execute(sql, params)
@@ -205,8 +162,10 @@ def q(sql, params=(), one=False):
     rows = cur.fetchall()
     return (rows[0] if rows else None) if one else rows
 
+
 def now_iso():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def init_db():
     q("""
@@ -215,8 +174,8 @@ def init_db():
       created_at TEXT NOT NULL,
       status TEXT NOT NULL,              -- lobby | drafting | done
       host_player_id TEXT NOT NULL,
-      turn_index INTEGER NOT NULL DEFAULT 0,   -- index into draft_order
-      pick_index INTEGER NOT NULL DEFAULT 0    -- counts total picks made
+      turn_index INTEGER NOT NULL DEFAULT 0,
+      pick_index INTEGER NOT NULL DEFAULT 0
     )
     """)
 
@@ -257,7 +216,7 @@ def init_db():
     q("""
     CREATE TABLE IF NOT EXISTS offer (
       room_code TEXT PRIMARY KEY,
-      phase TEXT NOT NULL,
+      phase TEXT NOT NULL,                -- private_setup | public_offer | mystery_offer | reveal
       actor_player_id TEXT NOT NULL,
       picker_player_id TEXT NOT NULL,
 
@@ -265,6 +224,8 @@ def init_db():
       real2 TEXT NOT NULL,
       real3 TEXT NOT NULL,
 
+      -- In Disguise mode, shown1-3 are pokemon names (with one disguised).
+      -- In Mystery modes, shown1-3 are the HINT STRINGS for each option.
       shown1 TEXT NOT NULL,
       shown2 TEXT NOT NULL,
       shown3 TEXT NOT NULL,
@@ -276,7 +237,11 @@ def init_db():
       picked_slot INTEGER NOT NULL DEFAULT 0,
       picked_real TEXT NOT NULL DEFAULT '',
       picked_shown TEXT NOT NULL DEFAULT '',
-      picked_at TEXT NOT NULL DEFAULT ''
+      picked_at TEXT NOT NULL DEFAULT '',
+
+      reveal_until TEXT NOT NULL DEFAULT '',
+      next_actor_player_id TEXT NOT NULL DEFAULT '',
+      next_picker_player_id TEXT NOT NULL DEFAULT ''
     )
     """)
 
@@ -288,48 +253,24 @@ def init_db():
     )
     """)
 
-def ensure_offer_reveal_columns():
-    cols = [r["name"] for r in q("PRAGMA table_info(offer)") or []]
-    if "reveal_until" not in cols:
-        q("ALTER TABLE offer ADD COLUMN reveal_until TEXT NOT NULL DEFAULT ''")
-    if "next_actor_player_id" not in cols:
-        q("ALTER TABLE offer ADD COLUMN next_actor_player_id TEXT NOT NULL DEFAULT ''")
-    if "next_picker_player_id" not in cols:
-        q("ALTER TABLE offer ADD COLUMN next_picker_player_id TEXT NOT NULL DEFAULT ''")
 
-def get_offer(room_code: str):
-    return q("SELECT * FROM offer WHERE room_code=?", (room_code,), one=True)
+def ensure_rooms_mode_column():
+    cols = [r["name"] for r in q("PRAGMA table_info(rooms)") or []]
+    if "game_mode" not in cols:
+        q("ALTER TABLE rooms ADD COLUMN game_mode TEXT NOT NULL DEFAULT 'Disguise Draft'")
 
-def advance_reveal_if_due(room_code: str):
-    """If we're in reveal phase and the 5s timer expired, advance to next private offer."""
-    off = get_offer(room_code)
-    if not off or off["phase"] != "reveal":
-        return
-
-    until = (off["reveal_until"] or "").strip()
-    if not until:
-        return
-
-    try:
-        reveal_dt = datetime.strptime(until, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return
-
-    if datetime.utcnow() < reveal_dt:
-        return
-
-    new_actor = (off["next_actor_player_id"] or "").strip()
-    new_picker = (off["next_picker_player_id"] or "").strip()
-    if not new_actor or not new_picker:
-        return
-
-    create_private_offer(room_code, new_actor, new_picker)
 
 init_db()
-ensure_offer_reveal_columns()
+ensure_rooms_mode_column()
+
+
+def enable_autorefresh():
+    if st.session_state.get("room_code") and st.session_state.get("player_id"):
+        st_autorefresh(interval=AUTO_REFRESH_MS, key=f"tick_{st.session_state.room_code}")
+
 
 # ----------------------------
-# PokeAPI helpers (names + sprites)
+# PokeAPI helpers
 # ----------------------------
 @st.cache_data(ttl=60 * 60 * 24)
 def fetch_all_pokemon_names():
@@ -353,6 +294,7 @@ def fetch_all_pokemon_names():
 
     return sorted(set([n for n in names if ok(n)]))
 
+
 @st.cache_data(ttl=60 * 60)
 def pokemon_sprite_url(name: str):
     try:
@@ -370,9 +312,61 @@ def pokemon_sprite_url(name: str):
     except Exception:
         return ""
 
+
+@st.cache_data(ttl=60 * 60)
+def pokemon_hint(name: str, mode: str) -> str:
+    """
+    Returns the single "category" string shown for each option in Mystery modes.
+    """
+    try:
+        pr = requests.get(f"{POKEAPI_BASE}/pokemon/{name}", timeout=12)
+        if pr.status_code != 200:
+            return "Unknown"
+        pdata = pr.json()
+
+        if mode == MODE_TYPE:
+            types = [t["type"]["name"] for t in pdata.get("types", [])]
+            if not types:
+                return "Unknown"
+            # preserve slot order
+            # (already in slot order from API)
+            return " / ".join([t.capitalize() for t in types])
+
+        if mode == MODE_HEIGHT:
+            # height in decimeters
+            dm = pdata.get("height", None)
+            if dm is None:
+                return "Unknown"
+            meters = dm / 10.0
+            feet = meters * 3.28084
+            return f"{meters:.1f} m ({feet:.1f} ft)"
+
+        if mode == MODE_WEIGHT:
+            # weight in hectograms
+            hg = pdata.get("weight", None)
+            if hg is None:
+                return "Unknown"
+            kg = hg / 10.0
+            lbs = kg * 2.20462
+            return f"{kg:.1f} kg ({lbs:.1f} lb)"
+
+        if mode == MODE_COLOR:
+            sr = requests.get(f"{POKEAPI_BASE}/pokemon-species/{name}", timeout=12)
+            if sr.status_code != 200:
+                return "Unknown"
+            sdata = sr.json()
+            color = (sdata.get("color") or {}).get("name", "Unknown")
+            return str(color).capitalize()
+
+        return "Unknown"
+    except Exception:
+        return "Unknown"
+
+
 def pretty_name(n: str) -> str:
     parts = n.replace("-", " ").split()
     return " ".join(p.capitalize() for p in parts)
+
 
 def sample_three_distinct(exclude=set()):
     names = fetch_all_pokemon_names()
@@ -381,11 +375,13 @@ def sample_three_distinct(exclude=set()):
         pool = names[:]
     return random.sample(pool, 3)
 
+
 # ----------------------------
 # Game logic helpers
 # ----------------------------
 def gen_id(k=12):
     return "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(k))
+
 
 def gen_room_code():
     while True:
@@ -394,42 +390,46 @@ def gen_room_code():
         if not exists:
             return code
 
-AUTO_REFRESH_MS = 1200
-
-def enable_autorefresh():
-    if st.session_state.get("room_code") and st.session_state.get("player_id"):
-        st_autorefresh(interval=AUTO_REFRESH_MS, key=f"tick_{st.session_state.room_code}")
 
 def add_feed(room_code: str, msg: str):
     q("INSERT INTO feed(room_code, at, message) VALUES(?,?,?)", (room_code, now_iso(), msg))
 
+
 def get_room(room_code: str):
     return q("SELECT * FROM rooms WHERE room_code=?", (room_code,), one=True)
+
 
 def get_players(room_code: str):
     return q("SELECT * FROM players WHERE room_code=? ORDER BY joined_at ASC", (room_code,))
 
+
 def get_player(player_id: str):
     return q("SELECT * FROM players WHERE player_id=?", (player_id,), one=True)
 
+
 def get_roster(room_code: str, player_id: str):
     return q("SELECT * FROM rosters WHERE room_code=? AND player_id=? ORDER BY slot ASC", (room_code, player_id))
+
 
 def roster_count(room_code: str, player_id: str):
     r = q("SELECT COUNT(*) AS c FROM rosters WHERE room_code=? AND player_id=?", (room_code, player_id), one=True)
     return int(r["c"]) if r else 0
 
+
 def total_picks(room_code: str):
     r = q("SELECT COUNT(*) AS c FROM rosters WHERE room_code=?", (room_code,), one=True)
     return int(r["c"]) if r else 0
+
 
 def set_session_player(room_code: str, player_id: str):
     st.session_state.room_code = room_code
     st.session_state.player_id = player_id
 
+
 def ensure_session():
     st.session_state.setdefault("room_code", "")
     st.session_state.setdefault("player_id", "")
+
 
 def create_room(host_name: str, host_icon: str):
     ensure_session()
@@ -441,8 +441,8 @@ def create_room(host_name: str, host_icon: str):
     room_code = gen_room_code()
     host_player_id = gen_id()
     q(
-        "INSERT INTO rooms(room_code, created_at, status, host_player_id, turn_index, pick_index) VALUES(?,?,?,?,0,0)",
-        (room_code, now_iso(), "lobby", host_player_id),
+        "INSERT INTO rooms(room_code, created_at, status, host_player_id, turn_index, pick_index, game_mode) VALUES(?,?,?,?,0,0,?)",
+        (room_code, now_iso(), "lobby", host_player_id, MODE_DISGUISE),
     )
     q(
         "INSERT INTO players(player_id, room_code, name, icon, joined_at, is_host) VALUES(?,?,?,?,?,1)",
@@ -451,6 +451,7 @@ def create_room(host_name: str, host_icon: str):
     add_feed(room_code, f"{host_icon} {host_name} created the room.")
     set_session_player(room_code, host_player_id)
     return room_code, host_player_id
+
 
 def join_room(room_code: str, name: str, icon: str):
     ensure_session()
@@ -475,6 +476,7 @@ def join_room(room_code: str, name: str, icon: str):
     set_session_player(room_code, player_id)
     return player_id, None
 
+
 def assign_draft_order(room_code: str):
     players = get_players(room_code)
     pids = [p["player_id"] for p in players]
@@ -485,34 +487,32 @@ def assign_draft_order(room_code: str):
         q("UPDATE players SET draft_pos=? WHERE player_id=?", (i, pid))
     add_feed(room_code, "Draft order assigned.")
 
+
 def get_order(room_code: str):
     rows = q("SELECT * FROM draft_order WHERE room_code=? ORDER BY pos ASC", (room_code,))
     return [r["player_id"] for r in rows]
 
-def next_picker(room_code: str, current_actor_pid: str):
+
+def next_in_order(room_code: str, current_pid: str):
     order = get_order(room_code)
     if not order:
         return None
-    i = order.index(current_actor_pid)
+    i = order.index(current_pid)
     return order[(i + 1) % len(order)]
 
-def start_draft(room_code: str):
-    room = get_room(room_code)
-    if not room or room["status"] != "lobby":
-        return
-    players = get_players(room_code)
-    if len(players) < 2:
-        add_feed(room_code, "Need at least 2 players to start.")
-        return
-    assign_draft_order(room_code)
-    q("UPDATE rooms SET status='drafting', turn_index=0, pick_index=0 WHERE room_code=?", (room_code,))
-    add_feed(room_code, "Game started. Drafting begins!")
-    order = get_order(room_code)
-    actor = order[0]
-    picker = order[1] if len(order) > 1 else order[0]
-    create_private_offer(room_code, actor, picker)
 
-def create_private_offer(room_code: str, actor_pid: str, picker_pid: str):
+def room_mode(room_code: str) -> str:
+    r = get_room(room_code)
+    return (r["game_mode"] if r and "game_mode" in r.keys() else MODE_DISGUISE) or MODE_DISGUISE
+
+
+def set_room_mode(room_code: str, mode: str):
+    if mode not in ALL_MODES:
+        mode = MODE_DISGUISE
+    q("UPDATE rooms SET game_mode=? WHERE room_code=?", (mode, room_code))
+
+
+def create_private_offer_disguise(room_code: str, actor_pid: str, picker_pid: str):
     players = get_players(room_code)
     if all(roster_count(room_code, p["player_id"]) >= GOAL_PER_PLAYER for p in players):
         q("UPDATE rooms SET status='done' WHERE room_code=?", (room_code,))
@@ -536,9 +536,7 @@ def create_private_offer(room_code: str, actor_pid: str, picker_pid: str):
       disguise_slot=0, disguise_name='',
       created_at=excluded.created_at,
       picked_slot=0, picked_real='', picked_shown='', picked_at='',
-      reveal_until='',
-      next_actor_player_id='',
-      next_picker_player_id=''
+      reveal_until='', next_actor_player_id='', next_picker_player_id=''
     """, (
         room_code, "private_setup", actor_pid, picker_pid,
         a, b, c, a, b, c,
@@ -546,6 +544,60 @@ def create_private_offer(room_code: str, actor_pid: str, picker_pid: str):
         0, "", "", "",
         "", "", ""
     ))
+
+
+def create_mystery_offer(room_code: str, picker_pid: str, mode: str):
+    players = get_players(room_code)
+    if all(roster_count(room_code, p["player_id"]) >= GOAL_PER_PLAYER for p in players):
+        q("UPDATE rooms SET status='done' WHERE room_code=?", (room_code,))
+        add_feed(room_code, "Draft complete.")
+        return
+
+    a, b, c = sample_three_distinct()
+    h1 = pokemon_hint(a, mode)
+    h2 = pokemon_hint(b, mode)
+    h3 = pokemon_hint(c, mode)
+
+    # In mystery modes: actor = picker (no separate actor step), phase=mystery_offer,
+    # shown1-3 store the hint strings.
+    q("""
+    INSERT INTO offer(room_code, phase, actor_player_id, picker_player_id,
+                      real1, real2, real3, shown1, shown2, shown3,
+                      disguise_slot, disguise_name, created_at,
+                      picked_slot, picked_real, picked_shown, picked_at,
+                      reveal_until, next_actor_player_id, next_picker_player_id)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(room_code) DO UPDATE SET
+      phase=excluded.phase,
+      actor_player_id=excluded.actor_player_id,
+      picker_player_id=excluded.picker_player_id,
+      real1=excluded.real1, real2=excluded.real2, real3=excluded.real3,
+      shown1=excluded.shown1, shown2=excluded.shown2, shown3=excluded.shown3,
+      disguise_slot=0, disguise_name='',
+      created_at=excluded.created_at,
+      picked_slot=0, picked_real='', picked_shown='', picked_at='',
+      reveal_until='', next_actor_player_id='', next_picker_player_id=''
+    """, (
+        room_code, "mystery_offer", picker_pid, picker_pid,
+        a, b, c, h1, h2, h3,
+        0, "", now_iso(),
+        0, "", "", "",
+        "", "", ""
+    ))
+
+
+def create_next_offer(room_code: str, new_actor: str, new_picker: str):
+    mode = room_mode(room_code)
+    if mode == MODE_DISGUISE:
+        create_private_offer_disguise(room_code, new_actor, new_picker)
+    else:
+        # sequential: offer shown only to the picker, who chooses for themselves
+        create_mystery_offer(room_code, new_picker, mode)
+
+
+def get_offer(room_code: str):
+    return q("SELECT * FROM offer WHERE room_code=?", (room_code,), one=True)
+
 
 def set_public_offer(room_code: str, disguise_slot: int, disguise_name: str):
     off = get_offer(room_code)
@@ -581,7 +633,36 @@ def set_public_offer(room_code: str, disguise_slot: int, disguise_name: str):
     add_feed(room_code, f"{actor['icon']} {actor['name']} displayed the selections.")
     return None
 
-def lock_pick(room_code: str, picker_pid: str, picked_slot: int):
+
+def start_draft(room_code: str):
+    room = get_room(room_code)
+    if not room or room["status"] != "lobby":
+        return
+
+    players = get_players(room_code)
+    if len(players) < 2:
+        add_feed(room_code, "Need at least 2 players to start.")
+        return
+
+    assign_draft_order(room_code)
+    q("UPDATE rooms SET status='drafting', turn_index=0, pick_index=0 WHERE room_code=?", (room_code,))
+    add_feed(room_code, f"Game started. Mode: **{room_mode(room_code)}**")
+
+    order = get_order(room_code)
+    if not order:
+        return
+
+    mode = room_mode(room_code)
+    if mode == MODE_DISGUISE:
+        actor = order[0]
+        picker = order[1] if len(order) > 1 else order[0]
+        create_private_offer_disguise(room_code, actor, picker)
+    else:
+        # Mystery modes: first offer goes to order[0]
+        create_mystery_offer(room_code, order[0], mode)
+
+
+def lock_pick_disguise(room_code: str, picker_pid: str, picked_slot: int):
     off = get_offer(room_code)
     if not off:
         return "No offer exists."
@@ -603,34 +684,43 @@ def lock_pick(room_code: str, picker_pid: str, picked_slot: int):
         return "You already have 6 Pokémon."
 
     slot = current_count + 1
-    q(
-        "INSERT INTO rosters(room_code, player_id, slot, pokemon) VALUES(?,?,?,?)",
-        (room_code, picker_pid, slot, picked_real)
-    )
+    q("INSERT INTO rosters(room_code, player_id, slot, pokemon) VALUES(?,?,?,?)",
+      (room_code, picker_pid, slot, picked_real))
 
     picker = get_player(picker_pid)
     lied = (picked_real != picked_shown)
     verdict = "✅ TRUTH" if not lied else "🕵️ LIE REVEALED"
     add_feed(room_code, f"{picker['icon']} {picker['name']} picked **{pretty_name(picked_shown)}** — {verdict} (was {pretty_name(picked_real)}).")
 
-    order = get_order(room_code)
-    if not order:
+    # Next turn logic (picker becomes actor)
+    players = get_players(room_code)
+    if all(roster_count(room_code, p["player_id"]) >= GOAL_PER_PLAYER for p in players):
+        q("UPDATE rooms SET status='done' WHERE room_code=?", (room_code,))
+        add_feed(room_code, "Draft complete.")
+        reveal_until = (datetime.utcnow() + timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S")
+        q("""
+        UPDATE offer
+        SET phase='reveal',
+            picked_slot=?,
+            picked_real=?,
+            picked_shown=?,
+            picked_at=?,
+            reveal_until=?,
+            next_actor_player_id='',
+            next_picker_player_id=''
+        WHERE room_code=?
+        """, (picked_slot, picked_real, picked_shown, now_iso(), reveal_until, room_code))
         return None
 
     new_actor = picker_pid
-    new_picker = next_picker(room_code, new_actor)
+    new_picker = next_in_order(room_code, new_actor)
 
-    players = get_players(room_code)
-    done = all(roster_count(room_code, p["player_id"]) >= GOAL_PER_PLAYER for p in players)
-
-    if not done:
-        safety = 0
-        while new_picker and roster_count(room_code, new_picker) >= GOAL_PER_PLAYER and safety < 50:
-            new_picker = next_picker(room_code, new_picker)
-            safety += 1
+    safety = 0
+    while new_picker and roster_count(room_code, new_picker) >= GOAL_PER_PLAYER and safety < 50:
+        new_picker = next_in_order(room_code, new_picker)
+        safety += 1
 
     reveal_until = (datetime.utcnow() + timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S")
-
     q("""
     UPDATE offer
     SET phase='reveal',
@@ -642,19 +732,106 @@ def lock_pick(room_code: str, picker_pid: str, picked_slot: int):
         next_actor_player_id=?,
         next_picker_player_id=?
     WHERE room_code=?
-    """, (
-        picked_slot, picked_real, picked_shown, now_iso(),
-        reveal_until,
-        "" if done else new_actor,
-        "" if done else (new_picker or ""),
-        room_code
-    ))
+    """, (picked_slot, picked_real, picked_shown, now_iso(), reveal_until, new_actor, new_picker, room_code))
+    return None
 
-    if done:
+
+def lock_pick_mystery(room_code: str, picker_pid: str, picked_slot: int):
+    off = get_offer(room_code)
+    if not off:
+        return "No offer exists."
+    if off["phase"] != "mystery_offer":
+        return "Not in mystery offer phase."
+    if picker_pid != off["picker_player_id"]:
+        return "It's not your turn to pick."
+    if picked_slot not in (1, 2, 3):
+        return "Pick a valid slot."
+
+    real_map = {1: off["real1"], 2: off["real2"], 3: off["real3"]}
+    hint_map = {1: off["shown1"], 2: off["shown2"], 3: off["shown3"]}
+
+    picked_real = real_map[picked_slot]
+    picked_hint = hint_map[picked_slot]
+
+    current_count = roster_count(room_code, picker_pid)
+    if current_count >= GOAL_PER_PLAYER:
+        return "You already have 6 Pokémon."
+
+    slot = current_count + 1
+    q("INSERT INTO rosters(room_code, player_id, slot, pokemon) VALUES(?,?,?,?)",
+      (room_code, picker_pid, slot, picked_real))
+
+    picker = get_player(picker_pid)
+    add_feed(room_code, f"{picker['icon']} {picker['name']} picked an option ({picked_hint}). Reveal incoming…")
+
+    # Next picker is next in order (skip full rosters)
+    players = get_players(room_code)
+    if all(roster_count(room_code, p["player_id"]) >= GOAL_PER_PLAYER for p in players):
         q("UPDATE rooms SET status='done' WHERE room_code=?", (room_code,))
         add_feed(room_code, "Draft complete.")
+        reveal_until = (datetime.utcnow() + timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S")
+        q("""
+        UPDATE offer
+        SET phase='reveal',
+            picked_slot=?,
+            picked_real=?,
+            picked_shown=?,
+            picked_at=?,
+            reveal_until=?,
+            next_actor_player_id='',
+            next_picker_player_id=''
+        WHERE room_code=?
+        """, (picked_slot, picked_real, picked_hint, now_iso(), reveal_until, room_code))
+        return None
 
+    new_picker = next_in_order(room_code, picker_pid)
+    safety = 0
+    while new_picker and roster_count(room_code, new_picker) >= GOAL_PER_PLAYER and safety < 50:
+        new_picker = next_in_order(room_code, new_picker)
+        safety += 1
+
+    reveal_until = (datetime.utcnow() + timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S")
+    q("""
+    UPDATE offer
+    SET phase='reveal',
+        picked_slot=?,
+        picked_real=?,
+        picked_shown=?,
+        picked_at=?,
+        reveal_until=?,
+        next_actor_player_id=?,
+        next_picker_player_id=?
+    WHERE room_code=?
+    """, (picked_slot, picked_real, picked_hint, now_iso(), reveal_until, picker_pid, new_picker, room_code))
     return None
+
+
+def advance_reveal_if_due(room_code: str):
+    off = get_offer(room_code)
+    if not off or off["phase"] != "reveal":
+        return
+
+    until = (off["reveal_until"] or "").strip()
+    if not until:
+        return
+
+    try:
+        reveal_dt = datetime.strptime(until, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return
+
+    if datetime.utcnow() < reveal_dt:
+        return
+
+    new_actor = (off["next_actor_player_id"] or "").strip()
+    new_picker = (off["next_picker_player_id"] or "").strip()
+
+    # If no next, just stop (end of draft case)
+    if not new_picker:
+        return
+
+    create_next_offer(room_code, new_actor or new_picker, new_picker)
+
 
 # ----------------------------
 # UI Helpers
@@ -667,80 +844,35 @@ def card(title: str, body_html: str):
     </div>
     """, unsafe_allow_html=True)
 
+
 def render_poke_card(name: str, label: str):
     url = pokemon_sprite_url(name)
     disp = pretty_name(name)
     if url:
-        st.markdown(f'<div class="poke-img">', unsafe_allow_html=True)
+        st.markdown('<div class="poke-img">', unsafe_allow_html=True)
         st.image(url, use_container_width=True)
         st.markdown(f'<div class="poke-name">{label}: {disp}</div>', unsafe_allow_html=True)
-        st.markdown(f'</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="poke-img"><div class="poke-name">{label}: {disp}</div><div class="small-muted">Sprite unavailable</div></div>', unsafe_allow_html=True)
-
-def render_reveal_only(picked_shown: str, picked_real: str):
-    """During reveal: show ONLY the picked image. If lie, animate to real. If truth, flash green twice."""
-    shown_url = pokemon_sprite_url(picked_shown)
-    real_url = pokemon_sprite_url(picked_real)
-    lied = (picked_shown != picked_real)
-
-    title = "🎭 Reveal"
-    sub = "Everyone can see the pick for a few seconds…"
-
-    if not shown_url:
-        # fallback: if sprite missing, just show text
         st.markdown(
-            f"<div class='reveal-stage'><div class='reveal-card'>"
-            f"<div class='reveal-title'>{title}</div>"
-            f"<div class='reveal-sub'>{sub}</div>"
-            f"<div class='small-muted'>Sprite unavailable for {pretty_name(picked_shown)}.</div>"
-            f"</div></div>",
+            f'<div class="poke-img"><div class="poke-name">{label}: {disp}</div>'
+            f'<div class="small-muted">Sprite unavailable</div></div>',
             unsafe_allow_html=True
         )
-        return
 
-    if lied and not real_url:
-        # lie but no real sprite; still show shown and then text
-        st.markdown(
-            f"<div class='reveal-stage'><div class='reveal-card'>"
-            f"<div class='reveal-title'>{title}</div>"
-            f"<div class='reveal-sub'>{sub}</div>"
-            f"<div class='reveal-box'>"
-            f"  <img class='reveal-img' src='{shown_url}'/>"
-            f"</div>"
-            f"<div style='margin-top:10px;' class='badge pill-bad'>🕵️ LIE — actually {pretty_name(picked_real)}</div>"
-            f"</div></div>",
-            unsafe_allow_html=True
-        )
-        return
 
-    if lied:
-        # Crossfade from shown to real
-        st.markdown(
-            f"<div class='reveal-stage'><div class='reveal-card'>"
-            f"<div class='reveal-title'>{title}</div>"
-            f"<div class='reveal-sub'>{sub}</div>"
-            f"<div class='reveal-box'>"
-            f"  <img class='reveal-img reveal-lie-shown' src='{shown_url}'/>"
-            f"  <img class='reveal-img reveal-lie-real'  src='{real_url}'/>"
-            f"</div>"
-            f"<div style='margin-top:10px;' class='badge pill-bad'>🕵️ LIE REVEALED</div>"
-            f"</div></div>",
-            unsafe_allow_html=True
-        )
-    else:
-        # Truth: flash green border twice
-        st.markdown(
-            f"<div class='reveal-stage'><div class='reveal-card'>"
-            f"<div class='reveal-title'>{title}</div>"
-            f"<div class='reveal-sub'>{sub}</div>"
-            f"<div class='reveal-box reveal-truth-box'>"
-            f"  <img class='reveal-img' src='{shown_url}'/>"
-            f"</div>"
-            f"<div style='margin-top:10px;' class='badge pill-good'>✅ TRUTH</div>"
-            f"</div></div>",
-            unsafe_allow_html=True
-        )
+def render_hint_card(slot_label: str, hint_title: str, hint_value: str):
+    st.markdown(
+        f"""
+        <div class="hint-card">
+          <div class="hint-title">{slot_label}</div>
+          <div class="hint-value">{hint_value}</div>
+          <div class="hint-sub">{hint_title}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 
 # ----------------------------
 # Main App
@@ -769,7 +901,7 @@ with left:
 
         can_create = not (st.session_state.room_code and st.session_state.player_id)
         if st.button("Create Room", use_container_width=True, disabled=not can_create):
-            rc, _pid = create_room(host_name.strip() or "Host", host_icon)
+            rc, pid = create_room(host_name.strip() or "Host", host_icon)
             st.success(f"Created room: {rc}")
             st.rerun()
 
@@ -783,7 +915,7 @@ with left:
 
         disabled_join = bool(st.session_state.room_code and st.session_state.player_id and st.session_state.room_code != room_code and room_code)
         if st.button("Join Room", use_container_width=True, disabled=disabled_join):
-            _pid, err = join_room(room_code, name.strip() or "Player", icon)
+            pid, err = join_room(room_code, name.strip() or "Player", icon)
             if err:
                 st.error(err)
             else:
@@ -807,11 +939,22 @@ with left:
         st.markdown(f'<div class="badge pill-good">Room: {rc}</div>', unsafe_allow_html=True)
 
         me = get_player(pid)
+
+        # Host picks mode BEFORE starting
         if room and me and me["is_host"] == 1 and room["status"] == "lobby":
+            st.write("")
+            current = room_mode(rc)
+            selected = st.selectbox("Game Mode", ALL_MODES, index=ALL_MODES.index(current) if current in ALL_MODES else 0)
+            if selected != current:
+                set_room_mode(rc, selected)
+                st.rerun()
+
+            st.write("")
             if st.button("Start Game", use_container_width=True):
                 start_draft(rc)
                 st.rerun()
 
+        # Auto-refresh
         st.write("")
         ar = st.toggle("Auto-refresh", value=True)
         if ar:
@@ -822,7 +965,8 @@ with left:
         for p in players:
             host_tag = " 👑" if p["is_host"] == 1 else ""
             st.markdown(
-                f"- {p['icon']} **{p['name']}**{host_tag}  <span class='small-muted'>({roster_count(rc, p['player_id'])}/{GOAL_PER_PLAYER})</span>",
+                f"- {p['icon']} **{p['name']}**{host_tag}  "
+                f"<span class='small-muted'>({roster_count(rc, p['player_id'])}/{GOAL_PER_PLAYER})</span>",
                 unsafe_allow_html=True
             )
 
@@ -834,9 +978,10 @@ with right:
         card("Lobby", "<div class='small-muted'>Create or join a room to begin.</div>")
     else:
         room = get_room(rc)
+        me = get_player(pid)
         players = get_players(rc)
 
-        # IMPORTANT: advance reveal BEFORE reading off again
+        # advance reveal if time is due (this is what makes the 5s reveal "auto move on")
         advance_reveal_if_due(rc)
         off = get_offer(rc)
 
@@ -867,84 +1012,146 @@ with right:
             if not off:
                 card("Current Offer", "<div class='small-muted'>No offer yet.</div>")
             else:
+                game_mode = room_mode(rc)
+
                 actor = get_player(off["actor_player_id"])
                 picker = get_player(off["picker_player_id"])
 
                 st.markdown("<div class='block-card'>", unsafe_allow_html=True)
                 st.markdown("### 📌 Current Offer")
                 st.markdown(
-                    f"<div class='badge'>Actor: <b>{actor['icon']} {actor['name']}</b></div> "
+                    f"<div class='badge'>Mode: <b>{game_mode}</b></div> "
                     f"<div class='badge'>Picker: <b>{picker['icon']} {picker['name']}</b></div>",
                     unsafe_allow_html=True
                 )
                 st.write("")
 
-                if off["phase"] == "private_setup":
-                    if pid != off["actor_player_id"]:
-                        st.info("Waiting for the current actor to prepare and display the selections…")
-                    else:
-                        st.markdown(
-                            "<div class='small-muted'>Only you can see the real Pokémon right now. Choose one slot to disguise, then display to everyone.</div>",
-                            unsafe_allow_html=True
-                        )
-                        st.write("")
+                # -------- Disguise Draft flow (your original) --------
+                if game_mode == MODE_DISGUISE:
+                    st.markdown(
+                        f"<div class='badge'>Actor: <b>{actor['icon']} {actor['name']}</b></div>",
+                        unsafe_allow_html=True
+                    )
+                    st.write("")
 
+                    if off["phase"] == "private_setup":
+                        if pid != off["actor_player_id"]:
+                            st.info("Waiting for the current actor to prepare and display the selections…")
+                        else:
+                            st.markdown(
+                                "<div class='small-muted'>Only you can see the real Pokémon right now. "
+                                "Choose one slot to disguise, then display to everyone.</div>",
+                                unsafe_allow_html=True
+                            )
+                            st.write("")
+                            colA, colB, colC = st.columns(3)
+                            with colA:
+                                render_poke_card(off["real1"], "Slot 1")
+                            with colB:
+                                render_poke_card(off["real2"], "Slot 2")
+                            with colC:
+                                render_poke_card(off["real3"], "Slot 3")
+
+                            st.write("")
+                            disguise_slot = st.radio("Which slot do you want to disguise?", [1, 2, 3], horizontal=True)
+                            all_names = fetch_all_pokemon_names()
+                            disguise_name = st.selectbox(
+                                "Disguise it as (autocomplete)",
+                                options=all_names,
+                                index=all_names.index("pikachu") if "pikachu" in all_names else 0
+                            )
+
+                            if st.button("✅ Display selections to everyone", use_container_width=True):
+                                err = set_public_offer(rc, disguise_slot, disguise_name)
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.rerun()
+
+                    elif off["phase"] == "public_offer":
+                        st.success("Selections are displayed to everyone.")
+                        st.write("")
                         colA, colB, colC = st.columns(3)
                         with colA:
-                            render_poke_card(off["real1"], "Slot 1")
+                            render_poke_card(off["shown1"], "Slot 1")
                         with colB:
-                            render_poke_card(off["real2"], "Slot 2")
+                            render_poke_card(off["shown2"], "Slot 2")
                         with colC:
-                            render_poke_card(off["real3"], "Slot 3")
+                            render_poke_card(off["shown3"], "Slot 3")
 
                         st.write("")
-                        disguise_slot = st.radio("Which slot do you want to disguise?", [1, 2, 3], horizontal=True)
-                        all_names = fetch_all_pokemon_names()
-                        disguise_name = st.selectbox(
-                            "Disguise it as (autocomplete)",
-                            options=all_names,
-                            index=all_names.index("pikachu") if "pikachu" in all_names else 0
-                        )
+                        st.markdown("#### ✅ Pick Phase")
+                        if pid != off["picker_player_id"]:
+                            st.info(f"Waiting for {picker['icon']} {picker['name']} to pick…")
+                        else:
+                            picked_slot = st.radio("Pick one:", [1, 2, 3], horizontal=True)
+                            if st.button("Lock in pick", use_container_width=True):
+                                err = lock_pick_disguise(rc, pid, picked_slot)
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.rerun()
 
-                        if st.button("✅ Display selections to everyone", use_container_width=True):
-                            err = set_public_offer(rc, disguise_slot, disguise_name)
-                            if err:
-                                st.error(err)
-                            else:
-                                st.rerun()
+                    elif off["phase"] == "reveal":
+                        # Keep your custom reveal animation changes separate;
+                        # here we just show the picked shown name + real if lied.
+                        st.warning("🎭 Reveal phase (5 seconds)…")
+                        st.write("")
+                        lied = (off["picked_real"] != off["picked_shown"])
+                        picked_to_show = off["picked_shown"] or off["picked_real"]
+                        if picked_to_show:
+                            render_poke_card(picked_to_show, "Picked")
+                        if lied:
+                            st.error(f"🕵️ LIE REVEALED — Actually **{pretty_name(off['picked_real'])}**")
+                        else:
+                            st.success("✅ TRUTH — Display matched the real Pokémon.")
 
-                elif off["phase"] == "public_offer":
-                    st.success("Selections are displayed to everyone.")
-                    st.write("")
+                # -------- Mystery modes flow --------
+                else:
+                    hint_title = {
+                        MODE_TYPE: "Typing",
+                        MODE_HEIGHT: "Height",
+                        MODE_WEIGHT: "Weight",
+                        MODE_COLOR: "Color",
+                    }.get(game_mode, "Hint")
 
-                    colA, colB, colC = st.columns(3)
-                    with colA:
-                        render_poke_card(off["shown1"], "Slot 1")
-                    with colB:
-                        render_poke_card(off["shown2"], "Slot 2")
-                    with colC:
-                        render_poke_card(off["shown3"], "Slot 3")
+                    if off["phase"] == "mystery_offer":
+                        if pid != off["picker_player_id"]:
+                            st.info(f"Waiting for {picker['icon']} {picker['name']} to pick…")
+                        else:
+                            st.markdown(
+                                "<div class='small-muted'>You can only see the hint category. "
+                                "Choose 1 of the 3 options for your roster.</div>",
+                                unsafe_allow_html=True
+                            )
+                            st.write("")
 
-                    st.write("")
-                    st.markdown("#### ✅ Pick Phase")
+                            colA, colB, colC = st.columns(3)
+                            with colA:
+                                render_hint_card("Option 1", hint_title, off["shown1"])
+                            with colB:
+                                render_hint_card("Option 2", hint_title, off["shown2"])
+                            with colC:
+                                render_hint_card("Option 3", hint_title, off["shown3"])
 
-                    if pid != off["picker_player_id"]:
-                        st.info(f"Waiting for {picker['icon']} {picker['name']} to pick…")
-                    else:
-                        picked_slot = st.radio("Pick one:", [1, 2, 3], horizontal=True)
-                        if st.button("Lock in pick", use_container_width=True):
-                            err = lock_pick(rc, pid, picked_slot)
-                            if err:
-                                st.error(err)
-                            else:
-                                st.rerun()
+                            st.write("")
+                            picked_slot = st.radio("Pick one:", [1, 2, 3], horizontal=True)
+                            if st.button("Lock in pick", use_container_width=True):
+                                err = lock_pick_mystery(rc, pid, picked_slot)
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.rerun()
 
-                elif off["phase"] == "reveal":
-                    # ✅ Your requested behavior:
-                    # show ONLY the picked image, then animate to the real (if lie) or flash green (if truth)
-                    picked_shown = (off["picked_shown"] or "").strip()
-                    picked_real = (off["picked_real"] or "").strip()
-                    render_reveal_only(picked_shown, picked_real)
+                    elif off["phase"] == "reveal":
+                        st.warning("🎭 Reveal phase (5 seconds)…")
+                        st.write("")
+                        # In mystery modes, picked_shown is the hint string (not a pokemon),
+                        # and picked_real is the actual pokemon.
+                        if off["picked_real"]:
+                            render_poke_card(off["picked_real"], "Picked Pokémon")
+                        if off["picked_shown"]:
+                            st.markdown(f"<div class='badge'>Hint was: <b>{off['picked_shown']}</b></div>", unsafe_allow_html=True)
 
                 st.markdown("</div>", unsafe_allow_html=True)
 

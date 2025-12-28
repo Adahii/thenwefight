@@ -3,507 +3,595 @@ import json
 import time
 import random
 import string
-import threading
+import sqlite3
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple
-
 import streamlit as st
-import requests
 from streamlit_autorefresh import st_autorefresh
 
-# -----------------------------
+# ----------------------------
 # Config
-# -----------------------------
-DATA_DIR = "data"
-ROOMS_DIR = os.path.join(DATA_DIR, "rooms")
-os.makedirs(ROOMS_DIR, exist_ok=True)
+# ----------------------------
+DB_PATH = "game.db"
+PICKS_PER_PLAYER = 6
+OFFER_SIZE = 3
+REFRESH_MS = 1500
 
-ICONS = ["🟥", "🟦", "🟩", "🟨", "🟪", "🟧", "⬛", "⬜", "⭐", "🔥", "💧", "🌿", "⚡", "👑", "🧠", "🗡️"]
+ICONS = ["🧢", "🎮", "⚡", "🔥", "🌊", "🌿", "🧠", "👑", "🐉", "🦊", "🐸", "🦁"]
 
-POKEAPI_LIST_URL = "https://pokeapi.co/api/v2/pokemon?limit=2000"
+# ----------------------------
+# Helpers
+# ----------------------------
+def db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# Simple “no mega” filter: PokeAPI already uses base species names (no "mega-"),
-# but we keep this in case you ever swap lists/sources.
-def is_allowed_pokemon_name(name: str) -> bool:
-    bad_tokens = ["mega", "gmax", "gigantamax"]
-    n = name.lower()
-    return not any(tok in n for tok in bad_tokens)
+def init_db():
+    conn = db()
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS rooms (
+            room_code TEXT PRIMARY KEY,
+            host_player_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'lobby',          -- lobby | drafting | done
+            created_at INTEGER NOT NULL
+        );
 
-STATE_LOCK = threading.Lock()
+        CREATE TABLE IF NOT EXISTS players (
+            player_id TEXT PRIMARY KEY,
+            room_code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            icon TEXT NOT NULL,
+            joined_at INTEGER NOT NULL,
+            is_host INTEGER NOT NULL DEFAULT 0,
+            seat INTEGER,                                  -- draft order position 0..n-1
+            FOREIGN KEY(room_code) REFERENCES rooms(room_code)
+        );
 
-# -----------------------------
-# Utilities: storage
-# -----------------------------
-def room_path(code: str) -> str:
-    return os.path.join(ROOMS_DIR, f"{code}.json")
+        CREATE TABLE IF NOT EXISTS state (
+            room_code TEXT PRIMARY KEY,
+            turn_index INTEGER NOT NULL DEFAULT 0,          -- whose turn (seat index)
+            round_num INTEGER NOT NULL DEFAULT 1,
+            picks_json TEXT NOT NULL DEFAULT '[]',          -- list of {player_id, pokemon_true, pokemon_display, was_lie}
+            current_offer_json TEXT,                        -- internal offer: {offer_true:[...], disguise_index:int, disguise_to:str, published:bool}
+            offer_published INTEGER NOT NULL DEFAULT 0,      -- 0/1
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(room_code) REFERENCES rooms(room_code)
+        );
 
-def load_room(code: str) -> Optional[Dict[str, Any]]:
-    path = room_path(code)
-    if not os.path.exists(path):
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_code TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            kind TEXT NOT NULL,                             -- info | pick | reveal
+            message TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+def now():
+    return int(time.time())
+
+def gen_code(n=5):
+    return "".join(random.choice(string.ascii_uppercase) for _ in range(n))
+
+def gen_id(n=12):
+    return "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(n))
+
+def add_log(room_code, kind, message):
+    conn = db()
+    conn.execute(
+        "INSERT INTO logs(room_code, created_at, kind, message) VALUES(?,?,?,?)",
+        (room_code, now(), kind, message),
+    )
+    conn.commit()
+    conn.close()
+
+def get_room(room_code):
+    conn = db()
+    r = conn.execute("SELECT * FROM rooms WHERE room_code=?", (room_code,)).fetchone()
+    conn.close()
+    return r
+
+def get_players(room_code):
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM players WHERE room_code=? ORDER BY COALESCE(seat, 999), joined_at",
+        (room_code,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+def get_state(room_code):
+    conn = db()
+    row = conn.execute("SELECT * FROM state WHERE room_code=?", (room_code,)).fetchone()
+    conn.close()
+    return row
+
+def upsert_state(room_code, **kwargs):
+    s = get_state(room_code)
+    conn = db()
+    if s is None:
+        # create default
+        conn.execute(
+            "INSERT INTO state(room_code, turn_index, round_num, picks_json, current_offer_json, offer_published, updated_at) VALUES(?,?,?,?,?,?,?)",
+            (room_code, 0, 1, "[]", None, 0, now()),
+        )
+    # update provided keys
+    cols = []
+    vals = []
+    for k, v in kwargs.items():
+        cols.append(f"{k}=?")
+        vals.append(v)
+    cols.append("updated_at=?")
+    vals.append(now())
+    vals.append(room_code)
+    conn.execute(f"UPDATE state SET {', '.join(cols)} WHERE room_code=?", vals)
+    conn.commit()
+    conn.close()
+
+# ----------------------------
+# Pokémon list (simple + no-megas)
+# ----------------------------
+@st.cache_data(show_spinner=False)
+def load_pokemon_list():
+    """
+    Pure-python list for autocomplete. For real completeness you can swap this
+    to a PokeAPI fetch + filter, but this keeps it reliable/offline-ish.
+    """
+    # Gen 1-9 base species-ish list is long; keeping a compact demo list.
+    # Replace with a full list file if you want (still Python-only).
+    base = [
+        "Bulbasaur","Ivysaur","Venusaur","Charmander","Charmeleon","Charizard",
+        "Squirtle","Wartortle","Blastoise","Pikachu","Raichu","Eevee","Vaporeon",
+        "Jolteon","Flareon","Espeon","Umbreon","Leafeon","Glaceon","Sylveon",
+        "Gengar","Dragonite","Tyranitar","Garchomp","Lucario","Greninja",
+        "Scizor","Metagross","Salamence","Snorlax","Gyarados","Mimikyu",
+        "Aegislash","Zoroark","Dragapult","Haxorus","Arcanine","Lapras",
+        "Cinderace","Inteleon","Rillaboom","Meowscarada","Skeledirge","Quaquaval",
+    ]
+    # No megas by construction (and you can add more non-mega names as desired)
+    return sorted(set(base))
+
+def normalize_name(x: str) -> str:
+    return x.strip().title()
+
+# ----------------------------
+# Core game logic
+# ----------------------------
+def create_room(host_name, host_icon):
+    room_code = gen_code()
+    host_id = gen_id()
+    conn = db()
+    conn.execute(
+        "INSERT INTO rooms(room_code, host_player_id, status, created_at) VALUES(?,?,?,?)",
+        (room_code, host_id, "lobby", now()),
+    )
+    conn.execute(
+        "INSERT INTO players(player_id, room_code, name, icon, joined_at, is_host) VALUES(?,?,?,?,?,1)",
+        (host_id, room_code, host_name, host_icon, now()),
+    )
+    conn.commit()
+    conn.close()
+    upsert_state(room_code)  # create initial state
+    add_log(room_code, "info", f"{host_icon} {host_name} created the room.")
+    return room_code, host_id
+
+def join_room(room_code, name, icon):
+    if not get_room(room_code):
+        raise ValueError("Room not found.")
+    pid = gen_id()
+    conn = db()
+    conn.execute(
+        "INSERT INTO players(player_id, room_code, name, icon, joined_at, is_host) VALUES(?,?,?,?,?,0)",
+        (pid, room_code, name, icon, now()),
+    )
+    conn.commit()
+    conn.close()
+    add_log(room_code, "info", f"{icon} {name} joined the room.")
+    return pid
+
+def assign_seats(room_code):
+    players = get_players(room_code)
+    # randomize seat order
+    pids = [p["player_id"] for p in players]
+    random.shuffle(pids)
+    conn = db()
+    for i, pid in enumerate(pids):
+        conn.execute("UPDATE players SET seat=? WHERE player_id=?", (i, pid))
+    conn.commit()
+    conn.close()
+    add_log(room_code, "info", "Draft order assigned.")
+    # reset state
+    upsert_state(
+        room_code,
+        turn_index=0,
+        round_num=1,
+        picks_json="[]",
+        current_offer_json=None,
+        offer_published=0,
+    )
+
+def current_player(room_code):
+    players = get_players(room_code)
+    s = get_state(room_code)
+    if not players or not s:
         return None
-    with STATE_LOCK:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-
-def save_room(code: str, state: Dict[str, Any]) -> None:
-    path = room_path(code)
-    with STATE_LOCK:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-
-def new_code(n=5) -> str:
-    alphabet = string.ascii_uppercase
-    return "".join(random.choice(alphabet) for _ in range(n))
-
-def now_ts() -> float:
-    return time.time()
-
-def ensure_room_exists(code: str) -> Dict[str, Any]:
-    state = load_room(code)
-    if state is None:
-        raise ValueError("Room does not exist.")
-    return state
-
-# -----------------------------
-# Pokémon data
-# -----------------------------
-@st.cache_data(ttl=60 * 60 * 12)
-def fetch_pokemon_list() -> Tuple[List[str], Dict[str, int]]:
-    """
-    Returns:
-      names: list of pokemon names (Title Case)
-      name_to_id: mapping "Name" -> id
-    """
-    try:
-        r = requests.get(POKEAPI_LIST_URL, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        results = data.get("results", [])
-
-        names = []
-        name_to_id = {}
-        for item in results:
-            raw = item["name"]  # e.g. "pikachu"
-            if not is_allowed_pokemon_name(raw):
-                continue
-
-            # id from URL .../pokemon/25/
-            url = item.get("url", "")
-            pid = None
-            try:
-                pid = int(url.rstrip("/").split("/")[-1])
-            except Exception:
-                pid = None
-
-            name = raw.replace("-", " ").title()
-            if pid is not None:
-                names.append(name)
-                name_to_id[name] = pid
-
-        # Keep only real-ish entries; PokeAPI includes many forms beyond 1025,
-        # but names here are generally fine. You can optionally clamp by pid <= 1025.
-        # names = [n for n in names if name_to_id[n] <= 1025]
-
-        names.sort()
-        return names, name_to_id
-    except Exception:
-        # Fallback minimal list if API is down
-        fallback = ["Bulbasaur", "Charmander", "Squirtle", "Pikachu", "Eevee", "Gengar", "Lucario", "Garchomp"]
-        return fallback, {n: i + 1 for i, n in enumerate(fallback)}
-
-def home_sprite_url(pid: int) -> str:
-    # Pokémon HOME renders (look 3D)
-    return f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/home/{pid}.png"
-
-# -----------------------------
-# Game logic
-# -----------------------------
-def make_empty_room(host_name: str, host_icon: str) -> Dict[str, Any]:
-    code = new_code()
-    host_id = f"p_{random.randint(100000, 999999)}"
-    state = {
-        "room_code": code,
-        "created_at": now_ts(),
-        "status": "lobby",  # lobby | drafting | done
-        "host_id": host_id,
-        "players": [
-            {"player_id": host_id, "name": host_name, "icon": host_icon, "joined_at": now_ts()}
-        ],
-        "order": [],  # list of player_ids in draft order
-        "turn_owner": None,  # player_id who is the "displayer"
-        "phase": None,  # "secret" | "pick"
-        "visible_to": None,  # player_id allowed to see current selections (secret owner or picker)
-        "current_pool": None,  # list of 3 dicts: {"true": name, "shown": name}
-        "rosters": {},  # player_id -> list of names
-        "log": [],
-        "version": 1,
-    }
-    return state
-
-def add_log(state: Dict[str, Any], msg: str) -> None:
-    state["log"].append({"t": now_ts(), "msg": msg})
-    state["log"] = state["log"][-200:]  # keep it bounded
-
-def join_room(code: str, name: str, icon: str) -> str:
-    state = ensure_room_exists(code)
-    if state["status"] != "lobby":
-        raise ValueError("Game already started.")
-    # prevent duplicate names? (optional)
-    player_id = f"p_{random.randint(100000, 999999)}"
-    state["players"].append({"player_id": player_id, "name": name, "icon": icon, "joined_at": now_ts()})
-    add_log(state, f"{icon} {name} joined.")
-    save_room(code, state)
-    return player_id
-
-def get_player(state: Dict[str, Any], player_id: str) -> Dict[str, Any]:
-    for p in state["players"]:
-        if p["player_id"] == player_id:
+    # seat indexes are 0..n-1
+    idx = s["turn_index"] % len(players)
+    for p in players:
+        if p["seat"] == idx:
             return p
-    raise KeyError("Player not found")
+    return None
 
-def next_player_id(state: Dict[str, Any], current_pid: str) -> str:
-    order = state["order"]
-    i = order.index(current_pid)
-    return order[(i + 1) % len(order)]
+def picks_for_player(picks, player_id):
+    return [x for x in picks if x["player_id"] == player_id]
 
-def everyone_has_six(state: Dict[str, Any]) -> bool:
-    for pid in state["order"]:
-        if len(state["rosters"].get(pid, [])) < 6:
+def game_done(room_code):
+    players = get_players(room_code)
+    s = get_state(room_code)
+    if not players or not s:
+        return False
+    picks = json.loads(s["picks_json"])
+    for p in players:
+        if len(picks_for_player(picks, p["player_id"])) < PICKS_PER_PLAYER:
             return False
     return True
 
-def random_three(names: List[str]) -> List[Dict[str, str]]:
-    picks = random.sample(names, 3)
-    return [{"true": p, "shown": p} for p in picks]
-
-def start_game(code: str) -> None:
-    state = ensure_room_exists(code)
-    if state["status"] != "lobby":
-        return
-    if len(state["players"]) < 2:
-        raise ValueError("Need at least 2 players.")
-
-    # Draft order random
-    pids = [p["player_id"] for p in state["players"]]
-    random.shuffle(pids)
-    state["order"] = pids
-
-    # Init rosters
-    state["rosters"] = {pid: [] for pid in pids}
-
-    # First "displayer" is order[0]
-    owner = pids[0]
-    state["turn_owner"] = owner
-    state["phase"] = "secret"
-    state["visible_to"] = owner
-
-    names, _ = fetch_pokemon_list()
-    state["current_pool"] = random_three(names)
-
-    state["status"] = "drafting"
-    add_log(state, "Game started. Draft order set.")
-    save_room(code, state)
-
-def owner_disguise(code: str, owner_id: str, slot: int, replacement_name: str) -> None:
-    state = ensure_room_exists(code)
-    if state["status"] != "drafting":
-        return
-    if state["phase"] != "secret":
-        return
-    if state["turn_owner"] != owner_id or state["visible_to"] != owner_id:
-        return
-
-    pool = state["current_pool"]
-    if not pool or slot not in [0, 1, 2]:
-        return
-    pool[slot]["shown"] = replacement_name
-    add_log(state, f"{get_player(state, owner_id)['name']} disguised a Pokémon.")
-    save_room(code, state)
-
-def owner_display_to_next(code: str, owner_id: str) -> None:
-    state = ensure_room_exists(code)
-    if state["status"] != "drafting":
-        return
-    if state["phase"] != "secret":
-        return
-    if state["turn_owner"] != owner_id or state["visible_to"] != owner_id:
-        return
-
-    picker = next_player_id(state, owner_id)
-    state["phase"] = "pick"
-    state["visible_to"] = picker
-    add_log(state, f"Selections displayed to {get_player(state, picker)['name']}.")
-    save_room(code, state)
-
-def picker_choose(code: str, picker_id: str, choice_index: int) -> None:
-    state = ensure_room_exists(code)
-    if state["status"] != "drafting":
-        return
-    if state["phase"] != "pick":
-        return
-    if state["visible_to"] != picker_id:
-        return
-
-    pool = state["current_pool"] or []
-    if choice_index not in [0, 1, 2] or len(pool) != 3:
-        return
-
-    chosen_shown = pool[choice_index]["shown"]
-    state["rosters"].setdefault(picker_id, []).append(chosen_shown)
-
-    # After picker chooses:
-    # picker becomes the new owner and generates a new secret pool
-    new_owner = picker_id
-    state["turn_owner"] = new_owner
-    state["phase"] = "secret"
-    state["visible_to"] = new_owner
-
-    names, _ = fetch_pokemon_list()
-    state["current_pool"] = random_three(names)
-
-    add_log(state, f"{get_player(state, picker_id)['name']} picked {chosen_shown}.")
-
-    if everyone_has_six(state):
-        state["status"] = "done"
-        state["phase"] = None
-        state["visible_to"] = None
-        state["current_pool"] = None
-        add_log(state, "Draft complete!")
-
-    save_room(code, state)
-
-# -----------------------------
-# UI helpers
-# -----------------------------
-def render_rosters(state: Dict[str, Any], name_to_id: Dict[str, int]) -> None:
-    st.subheader("Rosters")
-    cols = st.columns(len(state["order"]))
-    for i, pid in enumerate(state["order"]):
-        p = get_player(state, pid)
-        roster = state["rosters"].get(pid, [])
-        with cols[i]:
-            st.markdown(f"### {p['icon']} {p['name']}")
-            st.caption(f"{len(roster)}/6")
-            for mon in roster:
-                pid_num = name_to_id.get(mon)
-                if pid_num:
-                    st.image(home_sprite_url(pid_num), width=96)
-                st.write(mon)
-
-def render_pool(pool: List[Dict[str, str]], name_to_id: Dict[str, int]) -> None:
-    c1, c2, c3 = st.columns(3)
-    for col, idx in zip([c1, c2, c3], [0, 1, 2]):
-        shown = pool[idx]["shown"]
-        pid_num = name_to_id.get(shown)
-        with col:
-            if pid_num:
-                st.image(home_sprite_url(pid_num), use_container_width=True)
-            st.markdown(f"**{shown}**")
-
-# -----------------------------
-# Page styling
-# -----------------------------
-st.set_page_config(page_title="1.0.0 Then We Fight - Draft", page_icon="⚔️", layout="wide")
-st.markdown(
+def ensure_private_offer(room_code, pokemon_pool):
     """
-<style>
-/* modern-ish look */
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1200px; }
-[data-testid="stMetricValue"] { font-size: 1.1rem; }
-.small-muted { opacity: 0.75; font-size: 0.95rem; }
-.card {
-  padding: 14px 16px;
-  border-radius: 16px;
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(255,255,255,0.03);
-}
-hr { opacity: 0.25; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
+    If no current offer exists, create one (PRIVATE, not published).
+    """
+    s = get_state(room_code)
+    offer = json.loads(s["current_offer_json"]) if s and s["current_offer_json"] else None
+    if offer is None:
+        offer_true = random.sample(pokemon_pool, k=OFFER_SIZE)
+        offer = {
+            "offer_true": offer_true,
+            "disguise_index": None,
+            "disguise_to": None,
+            "published": False,
+        }
+        upsert_state(room_code, current_offer_json=json.dumps(offer), offer_published=0)
+        return offer
+    return offer
 
-# Autorefresh tick (fixes your AttributeError issue)
-st_autorefresh(interval=2000, key="tick")
+def publish_offer(room_code, disguise_index, disguise_to):
+    s = get_state(room_code)
+    offer = json.loads(s["current_offer_json"]) if s["current_offer_json"] else None
+    if not offer or offer.get("published"):
+        return
+    offer["disguise_index"] = disguise_index
+    offer["disguise_to"] = disguise_to
+    offer["published"] = True
+    upsert_state(room_code, current_offer_json=json.dumps(offer), offer_published=1)
 
-# -----------------------------
+    cp = current_player(room_code)
+    if cp:
+        add_log(room_code, "info", f"{cp['icon']} {cp['name']} displayed the selections.")
+
+def displayed_offer(offer):
+    """
+    Return list of displayed pokemon names (public view).
+    """
+    disp = offer["offer_true"][:]
+    if offer.get("published") and offer.get("disguise_index") is not None and offer.get("disguise_to"):
+        disp[offer["disguise_index"]] = offer["disguise_to"]
+    return disp
+
+def make_pick(room_code, picker_player_id, chosen_display_name):
+    """
+    Next player chooses one of the displayed options.
+    We store: true pokemon, display name, reveal whether lie.
+    Then advance turn and clear offer to generate the next private offer.
+    """
+    s = get_state(room_code)
+    offer = json.loads(s["current_offer_json"]) if s["current_offer_json"] else None
+    if not offer or not offer.get("published"):
+        raise ValueError("Offer not published yet.")
+
+    disp = displayed_offer(offer)
+    if chosen_display_name not in disp:
+        raise ValueError("Invalid selection.")
+
+    chosen_index = disp.index(chosen_display_name)
+    true_name = offer["offer_true"][chosen_index]
+    was_lie = (chosen_display_name != true_name)
+
+    picks = json.loads(s["picks_json"])
+    picks.append({
+        "player_id": picker_player_id,
+        "pokemon_true": true_name,
+        "pokemon_display": chosen_display_name,
+        "was_lie": was_lie,
+        "ts": now(),
+    })
+
+    # public log (everyone sees)
+    players = get_players(room_code)
+    picker = next((p for p in players if p["player_id"] == picker_player_id), None)
+    if picker:
+        add_log(room_code, "pick", f"{picker['icon']} {picker['name']} picked **{chosen_display_name}**.")
+        if was_lie:
+            add_log(room_code, "reveal", f"Reveal: It was a **lie** → actually **{true_name}**.")
+        else:
+            add_log(room_code, "reveal", f"Reveal: It was **true** → **{true_name}**.")
+
+    # advance turn
+    next_turn = (s["turn_index"] + 1)
+    # clear current offer (so next current player gets a private offer)
+    upsert_state(
+        room_code,
+        picks_json=json.dumps(picks),
+        turn_index=next_turn,
+        current_offer_json=None,
+        offer_published=0
+    )
+
+# ----------------------------
+# UI
+# ----------------------------
+st.set_page_config(page_title="ThenWeFight Draft", page_icon="🎮", layout="wide")
+init_db()
+
+pokemon_pool = load_pokemon_list()
+
 # Session identity
-# -----------------------------
 if "room_code" not in st.session_state:
     st.session_state.room_code = ""
 if "player_id" not in st.session_state:
     st.session_state.player_id = ""
-if "mode" not in st.session_state:
-    st.session_state.mode = "home"
 
-pokemon_names, name_to_id = fetch_pokemon_list()
+# autorefresh polling
+st_autorefresh(interval=REFRESH_MS, key="tick")
 
-# -----------------------------
-# HOME (host/join)
-# -----------------------------
-st.title("⚔️ Then We Fight — Secret Draft")
+st.markdown(
+    """
+    <style>
+      .block-container { padding-top: 2rem; }
+      .card { padding: 1rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; }
+      .muted { opacity: 0.7; }
+      .big { font-size: 1.2rem; font-weight: 700; }
+      .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.14); margin-right: 6px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-with st.container():
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    tab1, tab2 = st.tabs(["Host", "Join"])
+left, right = st.columns([1, 2], gap="large")
 
-    with tab1:
-        host_name = st.text_input("Your name", value="Host", key="host_name")
-        host_icon = st.selectbox("Icon", ICONS, index=0, key="host_icon")
+with left:
+    st.markdown("### 🎮 ThenWeFight Draft")
+    st.markdown("<div class='muted'>Pure Python • Streamlit • SQLite • No Supabase</div>", unsafe_allow_html=True)
+
+    mode = st.radio("Mode", ["Host", "Join"], horizontal=True)
+
+    if mode == "Host":
+        name = st.text_input("Your name", value="Host")
+        icon = st.selectbox("Icon", ICONS, index=0)
         if st.button("Create Room", use_container_width=True):
-            state = make_empty_room(host_name.strip() or "Host", host_icon)
-            code = state["room_code"]
-            save_room(code, state)
-            st.session_state.room_code = code
-            st.session_state.player_id = state["host_id"]
-            st.session_state.mode = "room"
+            room_code, pid = create_room(name.strip() or "Host", icon)
+            st.session_state.room_code = room_code
+            st.session_state.player_id = pid
             st.rerun()
 
-    with tab2:
-        code = st.text_input("Room code", value="", key="join_code").strip().upper()
-        join_name = st.text_input("Your name", value="Player", key="join_name")
-        join_icon = st.selectbox("Icon", ICONS, index=1, key="join_icon")
+    else:
+        room_code_in = st.text_input("Room code", value=st.session_state.room_code).strip().upper()
+        name = st.text_input("Your name", value="")
+        icon = st.selectbox("Icon", ICONS, index=1)
         if st.button("Join Room", use_container_width=True):
-            room = load_room(code)
-            if not room:
-                st.error("Room not found.")
+            if not room_code_in:
+                st.error("Enter a room code.")
             else:
-                try:
-                    pid = join_room(code, join_name.strip() or "Player", join_icon)
-                    st.session_state.room_code = code
-                    st.session_state.player_id = pid
-                    st.session_state.mode = "room"
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+                pid = join_room(room_code_in, name.strip() or "Player", icon)
+                st.session_state.room_code = room_code_in
+                st.session_state.player_id = pid
+                st.rerun()
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.divider()
 
-# -----------------------------
-# ROOM VIEW
-# -----------------------------
-code = st.session_state.room_code
-pid = st.session_state.player_id
+    if st.session_state.room_code:
+        st.markdown(f"**Room:** `{st.session_state.room_code}`")
+        st.markdown(f"**You:** `{st.session_state.player_id}`")
 
-if st.session_state.mode == "room" and code and pid:
-    state = load_room(code)
-    if not state:
-        st.error("Room no longer exists.")
+with right:
+    room_code = st.session_state.room_code
+    player_id = st.session_state.player_id
+
+    if not room_code or not player_id:
+        st.info("Host or join a room to begin.")
         st.stop()
 
-    me = get_player(state, pid)
+    room = get_room(room_code)
+    if not room:
+        st.error("Room not found.")
+        st.stop()
 
-    top = st.columns([1, 1, 2])
-    with top[0]:
-        st.metric("Room", state["room_code"])
-    with top[1]:
-        st.metric("Status", state["status"].title())
-    with top[2]:
-        st.write(f"**You:** {me['icon']} {me['name']}")
+    players = get_players(room_code)
+    me = next((p for p in players if p["player_id"] == player_id), None)
+    if not me:
+        st.error("You are not registered in this room anymore.")
+        st.stop()
 
-    st.divider()
+    state = get_state(room_code)
+    status = room["status"]
 
-    # LOBBY
-    if state["status"] == "lobby":
-        left, right = st.columns([1.2, 1])
-        with left:
-            st.subheader("Lobby")
-            st.write("Share the room code so friends can join.")
-            st.markdown("**Players:**")
-            for p in sorted(state["players"], key=lambda x: x["joined_at"]):
-                host_badge = " (Host)" if p["player_id"] == state["host_id"] else ""
-                st.write(f"{p['icon']} {p['name']}{host_badge}")
+    # Lobby
+    if status == "lobby":
+        st.markdown("### 🧩 Lobby")
+        c1, c2 = st.columns([2, 1])
 
-        with right:
-            st.subheader("Controls")
-            if pid == state["host_id"]:
-                if st.button("Start Game", type="primary", use_container_width=True):
-                    try:
-                        start_game(code)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
+        with c1:
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            st.markdown("**Players**")
+            for p in players:
+                host_tag = " 👑" if p["is_host"] else ""
+                seat_tag = f" · seat {p['seat']}" if p["seat"] is not None else ""
+                st.write(f"{p['icon']} **{p['name']}**{host_tag}{seat_tag}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with c2:
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            st.markdown("**Host controls**")
+            if me["is_host"]:
+                if st.button("Start Game (assign order)", use_container_width=True):
+                    assign_seats(room_code)
+                    conn = db()
+                    conn.execute("UPDATE rooms SET status='drafting' WHERE room_code=?", (room_code,))
+                    conn.commit()
+                    conn.close()
+                    add_log(room_code, "info", "Game started. Drafting begins!")
+                    st.rerun()
             else:
                 st.info("Waiting for host to start…")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    # DRAFTING
-    elif state["status"] == "drafting":
-        owner = state["turn_owner"]
-        phase = state["phase"]
-        visible_to = state["visible_to"]
-        pool = state["current_pool"] or []
-        picker = next_player_id(state, owner) if owner else None
+    # Drafting
+    elif status == "drafting":
+        st.markdown("### 🧠 Drafting")
 
-        # Always show order + rosters (public)
-        st.subheader("Draft Order")
-        order_names = " → ".join([f"{get_player(state, x)['icon']} {get_player(state, x)['name']}" for x in state["order"]])
-        st.write(order_names)
+        cp = current_player(room_code)
+        s = get_state(room_code)
+        picks = json.loads(s["picks_json"])
+        offer = ensure_private_offer(room_code, pokemon_pool)
+        published = bool(get_state(room_code)["offer_published"])
+
+        top = st.columns([2, 1, 1])
+        with top[0]:
+            st.markdown(
+                f"<span class='pill'>Turn: {cp['icon']} <b>{cp['name']}</b></span>"
+                f"<span class='pill'>Players: <b>{len(players)}</b></span>"
+                f"<span class='pill'>Goal: <b>{PICKS_PER_PLAYER}</b> each</span>",
+                unsafe_allow_html=True
+            )
+        with top[1]:
+            my_count = len(picks_for_player(picks, player_id))
+            st.metric("Your picks", my_count, f"{PICKS_PER_PLAYER - my_count} left")
+        with top[2]:
+            st.metric("Total picks", len(picks), f"of {len(players)*PICKS_PER_PLAYER}")
 
         st.divider()
-        render_rosters(state, name_to_id)
 
-        st.divider()
+        # Area 1: Offer / turn actions
+        st.markdown("#### 🎴 Current Offer")
 
-        # SECRET / PICK VISIBILITY LOGIC
-        is_visible_player = (pid == visible_to)
+        if cp["player_id"] == player_id and not published:
+            # PRIVATE view only for current player
+            st.info("Only you can see the real Pokémon right now. Choose one to disguise, then display to everyone.")
 
-        if not is_visible_player:
-            # Everyone else sees a waiting screen
-            if phase == "secret":
-                st.info(f"⏳ Waiting… **{get_player(state, owner)['name']}** is preparing the hidden selections.")
-            elif phase == "pick":
-                st.info(f"⏳ Waiting… **{get_player(state, visible_to)['name']}** is choosing a Pokémon.")
-            st.caption("This page auto-updates every ~2 seconds.")
+            real = offer["offer_true"]
+            st.write("**Real options (private):**")
+            st.write(" · ".join([f"**{x}**" for x in real]))
+
+            disguise_index = st.radio(
+                "Which one do you want to disguise?",
+                options=list(range(OFFER_SIZE)),
+                format_func=lambda i: f"Slot {i+1}: {real[i]}",
+                horizontal=True,
+            )
+            disguise_to = st.selectbox(
+                "Disguise it as (autocomplete)",
+                options=pokemon_pool,
+                index=0,
+            )
+
+            if st.button("✅ Display selections to everyone", use_container_width=True):
+                publish_offer(room_code, disguise_index, normalize_name(disguise_to))
+                st.rerun()
+
         else:
-            # The one player who is allowed to see the pool
-            if phase == "secret" and pid == owner:
-                st.subheader("Your turn: Prepare 3 Pokémon (only you can see this)")
-                render_pool(pool, name_to_id)
+            # PUBLIC or waiting
+            if not published:
+                st.warning("Waiting for the current player to display selections…")
+            else:
+                disp = displayed_offer(offer)
+                st.success("Selections are displayed to everyone:")
+                cols = st.columns(3)
+                for i, name in enumerate(disp):
+                    with cols[i]:
+                        st.markdown("<div class='card'>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='big'>Slot {i+1}</div>", unsafe_allow_html=True)
+                        st.markdown(f"**{name}**")
+                        st.markdown("</div>", unsafe_allow_html=True)
 
-                st.markdown("### Disguise one (optional)")
-                slot = st.radio("Which slot to disguise?", [1, 2, 3], horizontal=True)
-                replacement = st.selectbox(
-                    "Replacement Pokémon (type to search)",
-                    options=pokemon_names,
-                    index=pokemon_names.index(pool[slot - 1]["shown"]) if pool and pool[slot - 1]["shown"] in pokemon_names else 0,
-                )
+        # Area 2: Picking (only next player in line can pick, but everyone sees results via logs)
+        if published:
+            # Next picker is seat (turn_index+1) because current player is the "disguiser / shower"
+            # BUT your described flow: "player currently selecting the pokemon" is the one who saw & disguised,
+            # then NEXT player picks. This matches.
+            s2 = get_state(room_code)
+            next_seat = (s2["turn_index"] + 1) % len(players)
+            next_picker = next((p for p in players if p["seat"] == next_seat), None)
 
-                cA, cB = st.columns(2)
-                with cA:
-                    if st.button("Apply Disguise", use_container_width=True):
-                        owner_disguise(code, pid, slot - 1, replacement)
-                        st.rerun()
-                with cB:
-                    if st.button(f"Display Selections → {get_player(state, picker)['name']}", type="primary", use_container_width=True):
-                        owner_display_to_next(code, pid)
-                        st.rerun()
+            st.divider()
+            st.markdown("#### ✅ Pick Phase")
 
-                st.caption("When you click **Display Selections**, only the next player will see the 3 options.")
+            if next_picker and next_picker["player_id"] == player_id:
+                disp = displayed_offer(offer)
+                choice = st.radio("Pick one:", disp, horizontal=True)
+                if st.button("Lock in pick", use_container_width=True):
+                    make_pick(room_code, player_id, choice)
 
-            elif phase == "pick" and pid == visible_to:
-                st.subheader("Your turn: Pick 1 Pokémon (only you can see this)")
-                render_pool(pool, name_to_id)
+                    # After a pick, we advanced turn_index and cleared offer.
+                    # But we also need to advance one more so the NEXT disguiser becomes current player.
+                    # (Current turn_index tracks disguiser seat; after pick we moved it +1 to picker seat.
+                    # Now set it to picker seat (current) as next disguiser.)
+                    # That is already true after make_pick. Great.
 
-                choice = st.radio("Choose one", [1, 2, 3], horizontal=True)
-                if st.button("Confirm Pick", type="primary", use_container_width=True):
-                    picker_choose(code, pid, choice - 1)
+                    # If done, mark done
+                    if game_done(room_code):
+                        conn = db()
+                        conn.execute("UPDATE rooms SET status='done' WHERE room_code=?", (room_code,))
+                        conn.commit()
+                        conn.close()
+                        add_log(room_code, "info", "Draft complete!")
                     st.rerun()
+            else:
+                if next_picker:
+                    st.info(f"Waiting for {next_picker['icon']} {next_picker['name']} to pick…")
 
-                st.caption("After you pick, you become the next displayer and will secretly prepare the next 3.")
+        # Area 3: Public log + rosters
+        st.divider()
+        a, b = st.columns([1, 1], gap="large")
 
-    # DONE
-    elif state["status"] == "done":
-        st.success("✅ Draft complete!")
-        render_rosters(state, name_to_id)
+        with a:
+            st.markdown("#### 📣 Public Feed (everyone sees)")
+            conn = db()
+            logs = conn.execute(
+                "SELECT * FROM logs WHERE room_code=? ORDER BY id DESC LIMIT 20",
+                (room_code,),
+            ).fetchall()
+            conn.close()
+            for row in logs:
+                st.write(f"- {row['message']}")
 
-    # LOG
-    with st.expander("Room Log", expanded=False):
-        for item in state.get("log", [])[-60:]:
-            st.write(f"- {item['msg']}")
+        with b:
+            st.markdown("#### 🧾 Rosters")
+            for p in players:
+                myp = picks_for_player(picks, p["player_id"])
+                st.markdown(f"**{p['icon']} {p['name']}** ({len(myp)}/{PICKS_PER_PLAYER})")
+                if myp:
+                    # show display + reveal outcome
+                    for x in myp[-6:]:
+                        tag = "🟢 true" if not x["was_lie"] else "🔴 lie"
+                        st.write(f"• picked **{x['pokemon_display']}** → **{x['pokemon_true']}** ({tag})")
+                st.write("")
 
-    st.divider()
-    if st.button("Leave Room"):
-        st.session_state.room_code = ""
-        st.session_state.player_id = ""
-        st.session_state.mode = "home"
-        st.rerun()
+    # Done
+    else:
+        st.markdown("### 🏁 Draft Complete")
+        state = get_state(room_code)
+        picks = json.loads(state["picks_json"])
+        players = get_players(room_code)
+
+        for p in players:
+            myp = [x for x in picks if x["player_id"] == p["player_id"]]
+            st.markdown(f"#### {p['icon']} {p['name']}")
+            for x in myp:
+                tag = "🟢 true" if not x["was_lie"] else "🔴 lie"
+                st.write(f"- **{x['pokemon_display']}** → **{x['pokemon_true']}** ({tag})")
+
+        st.info("If you want, I can add a 'New Game' button + room cleanup.")

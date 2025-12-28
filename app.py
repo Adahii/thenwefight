@@ -4,6 +4,7 @@ import time
 import random
 import string
 from contextlib import contextmanager
+from streamlit_autorefresh import st_autorefresh
 
 import streamlit as st
 import requests

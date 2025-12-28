@@ -674,7 +674,7 @@ with left:
         st.write("")
         ar = st.toggle("Auto-refresh", value=True)
         if ar:
-            auto_refresh(2)
+            enable_autorefresh()
 
         st.write("")
         st.markdown("### Players")

@@ -408,14 +408,14 @@ if "player_id" not in st.session_state:
     st.session_state.player_id = None
 
 st.markdown('<div class="title">Then We Fight</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtle">Host / Join • Lobby • Random 3 • Disguise 1 • Draft to 6 • 1.0.0</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtle">Host / Join • Lobby • Random 3 • Disguise 1 • Draft to 6 • 1.0.1</div>', unsafe_allow_html=True)
 st.write("")
 
 # Auto-refresh for syncing
 # Lightweight: rerun every 2 seconds once in-room
 if st.session_state.room_code:
     time.sleep(0.2)
-    st.autorefresh(interval=2000, key="tick")
+    st_autorefresh(interval=2000, key="tick")
 
 # Not in a room: Host / Join
 if not st.session_state.room_code:

@@ -3,9 +3,10 @@ import random
 import string
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 import streamlit as st
+
 
 # ----------------------------
 # Page + Theme
@@ -218,8 +219,44 @@ def init_db():
       message TEXT NOT NULL
     )
     """)
+def ensure_offer_reveal_columns():
+    cols = [r["name"] for r in q("PRAGMA table_info(offer)") or []]
+    if "reveal_until" not in cols:
+        q("ALTER TABLE offer ADD COLUMN reveal_until TEXT NOT NULL DEFAULT ''")
+    if "next_actor_player_id" not in cols:
+        q("ALTER TABLE offer ADD COLUMN next_actor_player_id TEXT NOT NULL DEFAULT ''")
+    if "next_picker_player_id" not in cols:
+        q("ALTER TABLE offer ADD COLUMN next_picker_player_id TEXT NOT NULL DEFAULT ''")
+
+def advance_reveal_if_due(room_code: str):
+    """If we're in reveal phase and the 5s timer expired, advance to next private offer."""
+    off = get_offer(room_code)
+    if not off or off["phase"] != "reveal":
+        return
+
+    until = (off["reveal_until"] or "").strip()
+    if not until:
+        return
+
+    # Compare as strings safely by parsing; keep it simple
+    try:
+        reveal_dt = datetime.strptime(until, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return
+
+    if datetime.utcnow() < reveal_dt:
+        return  # not yet
+
+    # move to next turn
+    new_actor = (off["next_actor_player_id"] or "").strip()
+    new_picker = (off["next_picker_player_id"] or "").strip()
+    if not new_actor or not new_picker:
+        return
+
+    create_private_offer(room_code, new_actor, new_picker)
 
 init_db()
+ensure_offer_reveal_columns()
 
 # ----------------------------
 # PokeAPI helpers (names + sprites)
@@ -509,7 +546,6 @@ def lock_pick(room_code: str, picker_pid: str, picked_slot: int):
         return "Not in pick phase yet."
     if picker_pid != off["picker_player_id"]:
         return "It's not your turn to pick."
-
     if picked_slot not in (1, 2, 3):
         return "Pick a valid slot."
 
@@ -525,26 +561,22 @@ def lock_pick(room_code: str, picker_pid: str, picked_slot: int):
         return "You already have 6 Pokémon."
 
     slot = current_count + 1
-    q("INSERT INTO rosters(room_code, player_id, slot, pokemon) VALUES(?,?,?,?)",
-      (room_code, picker_pid, slot, picked_real))
-
-    q("""
-    UPDATE offer
-    SET picked_slot=?,
-        picked_real=?,
-        picked_shown=?,
-        picked_at=?
-    WHERE room_code=?
-    """, (picked_slot, picked_real, picked_shown, now_iso(), room_code))
+    q(
+        "INSERT INTO rosters(room_code, player_id, slot, pokemon) VALUES(?,?,?,?)",
+        (room_code, picker_pid, slot, picked_real)
+    )
 
     picker = get_player(picker_pid)
     actor = get_player(off["actor_player_id"])
 
     lied = (picked_real != picked_shown)
     verdict = "✅ TRUTH" if not lied else "🕵️ LIE REVEALED"
-    add_feed(room_code, f"{picker['icon']} {picker['name']} picked **{pretty_name(picked_shown)}** — {verdict} (was {pretty_name(picked_real)}).")
+    add_feed(
+        room_code,
+        f"{picker['icon']} {picker['name']} picked **{pretty_name(picked_shown)}** — {verdict} (was {pretty_name(picked_real)})."
+    )
 
-    # Advance: picker becomes new actor; next picker is next in order
+    # Decide who goes next (but DON'T create next offer yet)
     order = get_order(room_code)
     if not order:
         return None
@@ -552,20 +584,52 @@ def lock_pick(room_code: str, picker_pid: str, picked_slot: int):
     new_actor = picker_pid
     new_picker = next_picker(room_code, new_actor)
 
-    # If new_picker already has 6, keep advancing until someone who doesn't (or all done)
+    # If draft complete, end now (still fine to show reveal, but we can finish after)
     players = get_players(room_code)
     if all(roster_count(room_code, p["player_id"]) >= GOAL_PER_PLAYER for p in players):
         q("UPDATE rooms SET status='done' WHERE room_code=?", (room_code,))
         add_feed(room_code, "Draft complete.")
+        # Still set reveal so everyone sees the last pick for 5 seconds
+        reveal_until = (datetime.utcnow() + timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S")
+        q("""
+        UPDATE offer
+        SET phase='reveal',
+            picked_slot=?,
+            picked_real=?,
+            picked_shown=?,
+            picked_at=?,
+            reveal_until=?,
+            next_actor_player_id='',
+            next_picker_player_id=''
+        WHERE room_code=?
+        """, (picked_slot, picked_real, picked_shown, now_iso(), reveal_until, room_code))
         return None
 
+    # Skip players who already have 6
     safety = 0
-    while new_picker and roster_count(room_code, new_picker) >= GOAL_PER_PLAYER and safety < 20:
+    while new_picker and roster_count(room_code, new_picker) >= GOAL_PER_PLAYER and safety < 50:
         new_picker = next_picker(room_code, new_picker)
         safety += 1
 
-    # Create next private offer
-    create_private_offer(room_code, new_actor, new_picker)
+    # Enter reveal phase for 5 seconds
+    reveal_until = (datetime.utcnow() + timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S")
+
+    q("""
+    UPDATE offer
+    SET phase='reveal',
+        picked_slot=?,
+        picked_real=?,
+        picked_shown=?,
+        picked_at=?,
+        reveal_until=?,
+        next_actor_player_id=?,
+        next_picker_player_id=?
+    WHERE room_code=?
+    """, (
+        picked_slot, picked_real, picked_shown, now_iso(),
+        reveal_until, new_actor, new_picker, room_code
+    ))
+
     return None
 
 # ----------------------------
@@ -694,6 +758,8 @@ with right:
         me = get_player(pid)
         players = get_players(rc)
         off = get_offer(rc)
+        advance_reveal_if_due(rc)
+        off = get_offer(rc)
 
         # Header stats
         total = total_picks(rc)
@@ -796,6 +862,31 @@ with right:
                                 st.error(err)
                             else:
                                 st.rerun()
+                                elif off["phase"] == "reveal":
+                    # Everyone sees the offer + the picked result for 5 seconds
+                    st.warning("🎭 Reveal phase (5 seconds)… everyone can see what happened.")
+                    st.write("")
+
+                    colA, colB, colC = st.columns(3)
+
+                    def render_with_pick(name, label, is_picked):
+                        if is_picked:
+                            st.markdown("<div class='badge pill-warn'>PICKED</div>", unsafe_allow_html=True)
+                        render_poke_card(name, label)
+
+                    with colA:
+                        render_with_pick(off["shown1"], "Slot 1", off["picked_slot"] == 1)
+                    with colB:
+                        render_with_pick(off["shown2"], "Slot 2", off["picked_slot"] == 2)
+                    with colC:
+                        render_with_pick(off["shown3"], "Slot 3", off["picked_slot"] == 3)
+
+                    st.write("")
+                    lied = (off["picked_real"] != off["picked_shown"])
+                    if lied:
+                        st.error(f"🕵️ LIE REVEALED — It was actually **{pretty_name(off['picked_real'])}**")
+                    else:
+                        st.success("✅ TRUTH — The display matched the real Pokémon.")
 
                 st.markdown("</div>", unsafe_allow_html=True)
 

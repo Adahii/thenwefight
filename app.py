@@ -182,10 +182,18 @@ def q(sql, params=(), one=False):
     cur = db().cursor()
     cur.execute(sql, params)
     db().commit()
+
+    # If the query doesn't return rows (INSERT/UPDATE/etc.)
     if cur.description is None:
         return None
+
     rows = cur.fetchall()
-    return (rows[0] if rows else None) if one else rows
+    # Convert sqlite3.Row -> dict so .get() works everywhere
+    rows = [dict(r) for r in rows]
+
+    if one:
+        return rows[0] if rows else None
+    return rows
 
 def now_iso():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
